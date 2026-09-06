@@ -1,0 +1,611 @@
+#!/usr/bin/env python3
+"""Palette engine behind the amh.palette bar widget.
+
+Indexes the wallpaper library with `aether --extract-palette --json`, then
+ranks wallpapers against an Omarchy theme palette (or a single colour) in
+OKLab, so switching a theme also pulls a wallpaper that already speaks the
+theme's colours.
+
+Subcommands:
+  themes        installed themes + swatch colours (JSON)
+  current       active theme + swatch colours (JSON)
+  index         build/refresh the wallpaper palette cache
+  map           best wallpapers per theme (JSON, cached)
+  match         best wallpapers for one theme / one colour
+  apply         apply a theme and its palette-matched wallpaper
+  wallpaper     move to another matched wallpaper for a theme
+  from-color    generate a brand new theme (aether) out of one colour
+"""
+
+from __future__ import annotations
+
+import argparse
+import concurrent.futures as futures
+import json
+import math
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+HOME = Path.home()
+OMARCHY_PATH = Path(os.environ.get("OMARCHY_PATH", "/usr/share/omarchy"))
+SYSTEM_THEMES = OMARCHY_PATH / "themes"
+USER_THEMES = HOME / ".config/omarchy/themes"
+USER_BACKGROUNDS = HOME / ".config/omarchy/backgrounds"
+STATE = HOME / ".local/state/omarchy/current"
+WALLPAPER_DIR = Path(
+    os.environ.get("AMH_PALETTE_WALLPAPERS", HOME / "Pictures/wallpapers/active_theme")
+).expanduser()
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "amh-palette"
+INDEX_FILE = CACHE_DIR / "index.json"
+MAP_FILE = CACHE_DIR / "map.json"
+PICKS_FILE = CACHE_DIR / "picks.json"
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+LINK_PREFIX = "palette-"
+DEFAULT_POOL = 12
+
+# aether returns an ANSI-shaped palette: 0 background, 7/15 foreground,
+# 1-6 and 9-14 the chromatic slots.
+BG_SLOT = 0
+ACCENT_SLOTS = (1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14)
+SWATCH_KEYS = ("red", "green", "yellow", "blue", "magenta", "cyan")
+
+# How strongly the wallpaper's base tone has to match the theme background,
+# relative to "can this wallpaper express the theme's accents".
+BG_WEIGHT = 0.75
+MODE_PENALTY = 0.35
+# Saturation agreement: a grey wallpaper must not win a vivid theme just
+# because its neutral tones sit "not far" from every accent.
+CHROMA_WEIGHT = 1.5
+
+
+# --------------------------------------------------------------------------- #
+# colour math
+# --------------------------------------------------------------------------- #
+def parse_hex(value: str) -> tuple[float, float, float] | None:
+    text = value.strip().lstrip("#")
+    if len(text) == 3:
+        text = "".join(c * 2 for c in text)
+    if len(text) != 6:
+        return None
+    try:
+        return tuple(int(text[i : i + 2], 16) / 255.0 for i in (0, 2, 4))  # type: ignore[return-value]
+    except ValueError:
+        return None
+
+
+def srgb_to_oklab(rgb: tuple[float, float, float]) -> tuple[float, float, float]:
+    def lin(c: float) -> float:
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    r, g, b = (lin(c) for c in rgb)
+    l = math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b)
+    m = math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b)
+    s = math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b)
+    return (
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    )
+
+
+def lab_of(value: str) -> tuple[float, float, float] | None:
+    rgb = parse_hex(value)
+    return srgb_to_oklab(rgb) if rgb else None
+
+
+def lab_distance(a: tuple[float, float, float], b: tuple[float, float, float]) -> float:
+    # Hue/chroma mismatch reads louder than lightness mismatch when judging
+    # "is this the same palette", so lightness is the weighted term.
+    dl = (a[0] - b[0]) * 1.6
+    da = a[1] - b[1]
+    db = a[2] - b[2]
+    return math.sqrt(dl * dl + da * da + db * db)
+
+
+def chroma(lab: tuple[float, float, float]) -> float:
+    return math.hypot(lab[1], lab[2])
+
+
+# --------------------------------------------------------------------------- #
+# themes
+# --------------------------------------------------------------------------- #
+def read_colors(theme_dir: Path) -> dict[str, str]:
+    path = theme_dir / "colors.toml"
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        # Themes carrying hyprland gradient strings still parse as TOML; a
+        # genuine syntax error falls back to a line scan.
+        return scan_colors(path)
+    return {k: v for k, v in data.items() if isinstance(v, str)}
+
+
+def scan_colors(path: Path) -> dict[str, str]:
+    pattern = re.compile(r'^\s*([A-Za-z0-9_-]+)\s*=\s*["\']?(#[0-9A-Fa-f]{6})')
+    found: dict[str, str] = {}
+    try:
+        for line in path.read_text(errors="replace").splitlines():
+            match = pattern.match(line)
+            if match:
+                found[match.group(1)] = match.group(2)
+    except OSError:
+        return {}
+    return found
+
+
+def theme_entry(name: str, path: Path, colors: dict[str, str]) -> dict:
+    background = colors.get("background", "#111111")
+    foreground = colors.get("foreground", "#eeeeee")
+    swatches = [colors[key] for key in SWATCH_KEYS if key in colors]
+    if not swatches:
+        swatches = [colors.get("accent", foreground)]
+    return {
+        "name": name,
+        "label": name.replace("-", " "),
+        "mode": colors.get("mode", "dark"),
+        "background": background,
+        "foreground": foreground,
+        "accent": colors.get("accent", swatches[0]),
+        "swatches": swatches,
+        "path": str(path),
+        "user": path.is_relative_to(USER_THEMES),
+    }
+
+
+def themes() -> list[dict]:
+    found: dict[str, dict] = {}
+    for root in (SYSTEM_THEMES, USER_THEMES):
+        if not root.is_dir():
+            continue
+        for path in sorted(root.iterdir()):
+            if not path.is_dir():
+                continue
+            colors = read_colors(path)
+            if not colors:
+                # Empty/placeholder theme dirs would apply as a blank theme.
+                continue
+            found[path.name] = theme_entry(path.name, path, colors)
+    return [found[name] for name in sorted(found)]
+
+
+def current_theme_name() -> str:
+    try:
+        return (STATE / "theme.name").read_text().strip()
+    except OSError:
+        return ""
+
+
+def theme_by_name(name: str) -> dict:
+    slug = name.strip().lower().replace(" ", "-")
+    for theme in themes():
+        if theme["name"] == slug:
+            return theme
+    sys.exit(f"unknown theme: {name}")
+
+
+def current_theme() -> dict:
+    name = current_theme_name()
+    colors = read_colors(STATE / "theme")
+    if colors:
+        return theme_entry(name or "current", STATE / "theme", colors)
+    if not name:
+        sys.exit("no current theme")
+    return theme_by_name(name)
+
+
+# --------------------------------------------------------------------------- #
+# wallpaper index
+# --------------------------------------------------------------------------- #
+def wallpapers() -> list[Path]:
+    if not WALLPAPER_DIR.is_dir():
+        return []
+    return sorted(
+        p for p in WALLPAPER_DIR.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES
+    )
+
+
+def extract_palette(path: Path) -> list[str]:
+    try:
+        out = subprocess.run(
+            ["aether", "--extract-palette", str(path), "--json"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    try:
+        colors = json.loads(out).get("colors", [])
+    except ValueError:
+        return []
+    colors = [str(c).lower() for c in colors if parse_hex(str(c))]
+    return colors if len(colors) >= 8 else []
+
+
+def load_json(path: Path) -> dict:
+    try:
+        with path.open("rb") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_json(path: Path, payload: dict) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with tmp.open("w") as handle:
+        json.dump(payload, handle)
+    tmp.replace(path)
+
+
+def build_index(rebuild: bool = False, jobs: int = 0, quiet: bool = True) -> dict[str, dict]:
+    entries = {} if rebuild else load_json(INDEX_FILE).get("entries", {})
+    files = wallpapers()
+    known = {str(p) for p in files}
+    entries = {k: v for k, v in entries.items() if k in known}
+
+    stale: list[Path] = []
+    for path in files:
+        info = path.stat()
+        cached = entries.get(str(path))
+        if (
+            not cached
+            or cached.get("mtime") != int(info.st_mtime)
+            or cached.get("size") != info.st_size
+        ):
+            stale.append(path)
+
+    if not stale:
+        if not quiet:
+            print(f"index up to date ({len(entries)} wallpapers)", file=sys.stderr)
+        return entries
+
+    jobs = jobs or min(16, (os.cpu_count() or 4) * 2)
+    with futures.ThreadPoolExecutor(max_workers=jobs) as pool:
+        for done, (path, colors) in enumerate(zip(stale, pool.map(extract_palette, stale)), 1):
+            if colors:
+                info = path.stat()
+                entries[str(path)] = {
+                    "colors": colors,
+                    "mtime": int(info.st_mtime),
+                    "size": info.st_size,
+                }
+            if not quiet and (done % 25 == 0 or done == len(stale)):
+                print(f"indexed {done}/{len(stale)}", file=sys.stderr)
+    save_index(entries)
+    return entries
+
+
+def save_index(entries: dict[str, dict]) -> None:
+    save_json(INDEX_FILE, {"version": 1, "entries": entries})
+
+
+def index_signature(entries: dict[str, dict]) -> str:
+    stamp = max((int(e.get("mtime", 0)) for e in entries.values()), default=0)
+    return f"{len(entries)}:{stamp}"
+
+
+def mean_chroma(labs: list) -> float:
+    return sum(chroma(lab) for lab in labs) / len(labs) if labs else 0.0
+
+
+def prepared(entries: dict[str, dict]) -> list[tuple[str, tuple[float, float, float], list, float]]:
+    """Pre-convert every wallpaper palette to OKLab once per process."""
+    out = []
+    for path, entry in entries.items():
+        colors = entry.get("colors") or []
+        if not colors:
+            continue
+        bg = lab_of(colors[BG_SLOT]) or (0.0, 0.0, 0.0)
+        accents = [
+            lab
+            for slot in ACCENT_SLOTS
+            if slot < len(colors) and (lab := lab_of(colors[slot])) is not None
+        ] or [bg]
+        out.append((path, bg, accents, mean_chroma(accents)))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# matching
+# --------------------------------------------------------------------------- #
+def theme_targets(theme: dict) -> tuple[list, tuple[float, float, float], bool]:
+    targets = [lab for c in theme["swatches"] if (lab := lab_of(c)) is not None]
+    background = lab_of(theme["background"]) or (0.0, 0.0, 0.0)
+    return targets, background, theme.get("mode", "dark") != "light"
+
+
+def rank_theme(theme: dict, pool: list, count: int) -> list[dict]:
+    targets, theme_bg, dark_theme = theme_targets(theme)
+    if not targets:
+        return []
+    theme_chroma = mean_chroma(targets)
+    scored: list[tuple[float, str]] = []
+    for path, wp_bg, wp_accents, wp_chroma in pool:
+        accent_cost = 0.0
+        for target in targets:
+            best = math.inf
+            for accent in wp_accents:
+                distance = lab_distance(target, accent)
+                if distance < best:
+                    best = distance
+            accent_cost += best
+        accent_cost /= len(targets)
+        cost = (
+            accent_cost
+            + BG_WEIGHT * lab_distance(theme_bg, wp_bg)
+            + CHROMA_WEIGHT * abs(theme_chroma - wp_chroma)
+        )
+        if dark_theme != (wp_bg[0] < 0.5):
+            cost += MODE_PENALTY
+        scored.append((cost, path))
+    scored.sort()
+    return [{"score": round(score, 4), "path": path} for score, path in scored[:count]]
+
+
+def rank_color(hex_color: str, pool: list, count: int, dark: bool) -> list[dict]:
+    target = lab_of(hex_color)
+    if target is None:
+        sys.exit(f"bad colour: {hex_color}")
+    saturation = min(chroma(target), 0.2)
+    scored: list[tuple[float, str]] = []
+    for path, wp_bg, wp_accents, _ in pool:
+        best = math.inf
+        presence = 0
+        for accent in wp_accents:
+            distance = lab_distance(target, accent)
+            if distance < best:
+                best = distance
+            if distance < 0.18:
+                presence += 1
+        cost = best - 0.02 * presence
+        if presence:
+            # Prefer wallpapers where the colour is a real presence, not a
+            # single stray pixel cluster.
+            cost -= 0.4 * saturation
+        if dark != (wp_bg[0] < 0.5):
+            cost += MODE_PENALTY
+        scored.append((cost, path))
+    scored.sort()
+    return [{"score": round(score, 4), "path": path} for score, path in scored[:count]]
+
+
+def theme_map(pool_size: int = DEFAULT_POOL, refresh: bool = False) -> dict:
+    entries = build_index()
+    signature = index_signature(entries)
+    all_themes = themes()
+    names = sorted(t["name"] for t in all_themes)
+    cached = load_json(MAP_FILE)
+    if (
+        not refresh
+        and cached.get("signature") == signature
+        and cached.get("pool") == pool_size
+        and sorted(cached.get("themes", {})) == names
+    ):
+        return cached
+
+    pool = prepared(entries)
+    payload = {
+        "version": 1,
+        "signature": signature,
+        "pool": pool_size,
+        "themes": {theme["name"]: rank_theme(theme, pool, pool_size) for theme in all_themes},
+    }
+    save_json(MAP_FILE, payload)
+    return payload
+
+
+def matches_for_theme(theme: dict, count: int) -> list[dict]:
+    cached = theme_map().get("themes", {}).get(theme["name"])
+    if cached and len(cached) >= count:
+        return cached[:count]
+    return rank_theme(theme, prepared(build_index()), count)
+
+
+def matches_for_color(hex_color: str, count: int, dark: bool) -> list[dict]:
+    return rank_color(hex_color, prepared(build_index()), count, dark)
+
+
+# --------------------------------------------------------------------------- #
+# applying
+# --------------------------------------------------------------------------- #
+def remember_pick(theme: dict, index: int) -> None:
+    picks = load_json(PICKS_FILE)
+    picks[theme["name"]] = index
+    save_json(PICKS_FILE, picks)
+
+
+def choose_wallpaper(theme: dict, pool: int, pick: str) -> str | None:
+    hits = matches_for_theme(theme, max(pool, 1))
+    if not hits:
+        return None
+    if pick == "random":
+        index = random.randrange(len(hits))
+    elif pick in ("next", "prev"):
+        step = 1 if pick == "next" else -1
+        index = (int(load_json(PICKS_FILE).get(theme["name"], -1)) + step) % len(hits)
+    else:
+        index = 0
+    # Cycling always continues from whatever was last shown, including the
+    # best match a theme switch landed on.
+    remember_pick(theme, index)
+    return hits[index]["path"]
+
+
+def sync_theme_links(theme: dict, pool: int) -> None:
+    """Expose the matched wallpapers as the theme's own background rotation.
+
+    `omarchy-theme-set` and `omarchy-theme-bg-next` only enumerate
+    ~/.config/omarchy/backgrounds/<theme>/ and the theme's backgrounds dir, so
+    symlinking the matches there keeps omarchy's own background cycling inside
+    the palette-matched set.
+    """
+    hits = matches_for_theme(theme, max(pool, 1))
+    target = USER_BACKGROUNDS / theme["name"]
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        for stale in target.glob(f"{LINK_PREFIX}*"):
+            if stale.is_symlink():
+                stale.unlink()
+        for position, hit in enumerate(hits, 1):
+            source = Path(hit["path"])
+            link = target / f"{LINK_PREFIX}{position:02d}{source.suffix.lower()}"
+            link.symlink_to(source)
+    except OSError as error:
+        print(f"could not sync background links: {error}", file=sys.stderr)
+
+
+def run(command: list[str], env: dict | None = None) -> int:
+    if not shutil.which(command[0]):
+        print(f"missing command: {command[0]}", file=sys.stderr)
+        return 127
+    return subprocess.run(command, env=env).returncode
+
+
+def set_wallpaper(path: str) -> int:
+    return run(["omarchy-theme-bg-set", path])
+
+
+def apply_theme(name: str, pool: int, pick: str, keep_wallpaper: bool) -> int:
+    theme = theme_by_name(name)
+    wallpaper = None
+    if not keep_wallpaper:
+        sync_theme_links(theme, pool)
+        wallpaper = choose_wallpaper(theme, pool, pick)
+
+    env = dict(os.environ)
+    if wallpaper:
+        # Let omarchy hot-swap the palette without picking its own background,
+        # then crossfade straight to the palette-matched one.
+        env["OMARCHY_THEME_SKIP_BACKGROUND"] = "1"
+    code = run(["omarchy-theme-set", theme["name"]], env=env)
+    if wallpaper:
+        set_wallpaper(wallpaper)
+    return code
+
+
+# --------------------------------------------------------------------------- #
+# cli
+# --------------------------------------------------------------------------- #
+def emit(payload) -> None:
+    json.dump(payload, sys.stdout)
+    sys.stdout.write("\n")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(prog="palette", description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("themes", help="list themes with swatches (JSON)")
+    sub.add_parser("current", help="active theme with swatches (JSON)")
+
+    p_index = sub.add_parser("index", help="build the wallpaper palette cache")
+    p_index.add_argument("--rebuild", action="store_true")
+    p_index.add_argument("--jobs", type=int, default=0)
+
+    p_map = sub.add_parser("map", help="matched wallpapers per theme (JSON)")
+    p_map.add_argument("--pool", type=int, default=DEFAULT_POOL)
+    p_map.add_argument("--refresh", action="store_true")
+
+    p_match = sub.add_parser("match", help="best-matching wallpapers")
+    p_match.add_argument("--theme", default="")
+    p_match.add_argument("--color", default="")
+    p_match.add_argument("-n", "--count", type=int, default=8)
+    p_match.add_argument("--json", action="store_true")
+
+    p_apply = sub.add_parser("apply", help="apply a theme + matched wallpaper")
+    p_apply.add_argument("theme")
+    p_apply.add_argument("--pool", type=int, default=DEFAULT_POOL)
+    p_apply.add_argument("--pick", choices=("best", "next", "prev", "random"), default="best")
+    p_apply.add_argument("--keep-wallpaper", action="store_true")
+
+    p_wall = sub.add_parser("wallpaper", help="set a matched wallpaper")
+    p_wall.add_argument("theme", nargs="?", default="")
+    p_wall.add_argument("--pool", type=int, default=DEFAULT_POOL)
+    p_wall.add_argument("--pick", choices=("best", "next", "prev", "random"), default="next")
+
+    p_from = sub.add_parser("from-color", help="generate a theme from a colour (aether)")
+    p_from.add_argument("color")
+    p_from.add_argument("--light", action="store_true")
+    p_from.add_argument("--mode", default="", help="aether extraction mode")
+    p_from.add_argument("--dry-run", action="store_true")
+
+    args = parser.parse_args()
+
+    if args.command == "themes":
+        emit(themes())
+        return 0
+
+    if args.command == "current":
+        emit(current_theme())
+        return 0
+
+    if args.command == "index":
+        entries = build_index(rebuild=args.rebuild, jobs=args.jobs, quiet=False)
+        theme_map(refresh=True)
+        print(f"{len(entries)} wallpapers indexed", file=sys.stderr)
+        return 0
+
+    if args.command == "map":
+        emit(theme_map(pool_size=args.pool, refresh=args.refresh))
+        return 0
+
+    if args.command == "match":
+        if args.color:
+            theme = current_theme()
+            hits = matches_for_color(args.color, args.count, theme["mode"] != "light")
+        else:
+            theme = theme_by_name(args.theme) if args.theme else current_theme()
+            hits = matches_for_theme(theme, args.count)
+        if args.json:
+            emit(hits)
+        else:
+            for hit in hits:
+                print(f"{hit['score']:7.4f}  {hit['path']}")
+        return 0
+
+    if args.command == "apply":
+        return apply_theme(args.theme, args.pool, args.pick, args.keep_wallpaper)
+
+    if args.command == "wallpaper":
+        theme = theme_by_name(args.theme) if args.theme else current_theme()
+        wallpaper = choose_wallpaper(theme, args.pool, args.pick)
+        if not wallpaper:
+            print("no wallpaper match found", file=sys.stderr)
+            return 1
+        print(wallpaper)
+        return set_wallpaper(wallpaper)
+
+    if args.command == "from-color":
+        dark = not args.light
+        hits = matches_for_color(args.color, 1, dark)
+        if not hits:
+            print("no wallpaper match found", file=sys.stderr)
+            return 1
+        wallpaper = hits[0]["path"]
+        command = ["aether", "--generate", wallpaper]
+        if args.light:
+            command.append("--light-mode")
+        if args.mode:
+            command += ["--extract-mode", args.mode]
+        if args.dry_run:
+            print(" ".join(command))
+            return 0
+        return run(command)
+
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

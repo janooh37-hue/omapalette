@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "id": "amh.palette",
+  "name": "Palette",
+  "version": "1.0.0",
+  "author": "amh",
+  "description": "Theme palette circles that morph into a capsule, switching theme and palette-matched wallpaper",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Palette.qml"
+  },
+  "barWidget": {
+    "displayName": "Palette",
+    "description": "Theme switcher driven by colour: morphing palette circles plus wallpaper matching",
+    "category": "Appearance",
+    "defaultSection": "right",
+    "allowMultiple": false,
+    "schema": [
+      {
+        "key": "dots",
+        "type": "string",
+        "label": "Swatch count",
+        "description": "How many palette circles to show in the bar (2-8)",
+        "defaultValue": "6"
+      },
+      {
+        "key": "dotSize",
+        "type": "string",
+        "label": "Swatch size",
+        "description": "Circle diameter in pixels before scaling",
+        "defaultValue": "7"
+      },
+      {
+        "key": "columns",
+        "type": "string",
+        "label": "Popup columns",
+        "description": "Theme cards per row in the popup",
+        "defaultValue": "3"
+      },
+      {
+        "key": "autoIndex",
+        "type": "boolean",
+        "label": "Keep wallpaper index warm",
+        "description": "Refresh the wallpaper palette cache shortly after login",
+        "defaultValue": true
+      }
+    ]
+  }
+}
