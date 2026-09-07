@@ -49,11 +49,14 @@ with `rm ~/.config/omarchy/backgrounds/*/palette-*`.
 
 ## Requirements
 
-| Dependency | Why | Install |
+| Dependency | Why | Where it comes from |
 |---|---|---|
 | Omarchy 4 (Quattro) shell | plugin host | ships with Omarchy |
-| `aether` | palette extraction and theme generation | `omarchy pkg add aether` |
+| `aether` | palette extraction and theme generation | Arch package `aether` (install it with your package manager) |
 | `python3` ≥ 3.11 | `bin/palette` engine (`tomllib`) | ships with Arch |
+
+The plugin never installs anything itself; install `aether` yourself before
+enabling the widget.
 
 Nothing is downloaded at runtime. `bin/palette` only reads theme `colors.toml`
 files and your wallpapers, and shells out to `aether`, `omarchy-theme-set`,
