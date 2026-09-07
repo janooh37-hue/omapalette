@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "id": "amh.palette",
-  "name": "Palette",
+  "id": "omapalette",
+  "name": "Omapalette",
   "version": "1.0.0",
   "author": "amh",
-  "description": "Theme palette circles that morph into a capsule, switching theme and palette-matched wallpaper",
+  "description": "Point it at your wallpaper collection and watch it dress your desktop: themes matched to the wallpapers they belong with, and a brand new theme generated from any colour you click",
   "kinds": [
     "bar-widget"
   ],
@@ -12,8 +12,8 @@
     "barWidget": "Palette.qml"
   },
   "barWidget": {
-    "displayName": "Palette",
-    "description": "Theme switcher driven by colour: morphing palette circles plus wallpaper matching",
+    "displayName": "Omapalette",
+    "description": "Palette circles in the bar. Point it at your wallpapers and it matches, switches, and generates themes from colour",
     "category": "Appearance",
     "defaultSection": "right",
     "allowMultiple": false,

@@ -7,12 +7,12 @@ import "PaletteData.js" as PaletteData
 // Bar widget: the active theme's palette as small circles that morph into one
 // capsule, plus a popup that switches themes by colour. Every theme card shows
 // the wallpaper that switching will pull in — chosen by matching the wallpaper
-// library's aether palettes against the theme palette in OKLab (bin/palette).
+// library's aether palettes against the theme palette in OKLab (bin/omapalette).
 Panel {
   id: root
 
-  moduleName: "amh.palette"
-  ipcTarget: "amh.palette"
+  moduleName: "omapalette"
+  ipcTarget: "omapalette"
   // This file owns the single IpcHandler the target allows, so it can expose
   // theme/wallpaper actions next to the inherited open/close/toggle.
   manageIpc: false
@@ -23,7 +23,7 @@ Panel {
   readonly property int columns: Math.max(2, Number(setting("columns", 3)))
   readonly property bool autoIndex: setting("autoIndex", true) !== false
 
-  readonly property string script: Qt.resolvedUrl("bin/palette").toString().replace(/^file:\/\//, "")
+  readonly property string script: Qt.resolvedUrl("bin/omapalette").toString().replace(/^file:\/\//, "")
 
   // --- live state ----------------------------------------------------------
   property var themeColors: ({})
@@ -265,7 +265,7 @@ Panel {
   }
 
   IpcHandler {
-    target: "amh.palette"
+    target: "omapalette"
 
     function open(): void { root.open() }
     function close(): void { root.close() }
@@ -278,7 +278,7 @@ Panel {
   }
 
   // --- bar surface ---------------------------------------------------------
-  // Lets `omarchy-shell amh.palette morph` play the morph without a pointer.
+  // Lets `omarchy-shell omapalette morph` play the morph without a pointer.
   Timer {
     id: previewMorph
     interval: 1400

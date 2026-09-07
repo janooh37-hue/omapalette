@@ -1,51 +1,54 @@
-# amh.palette
+# Omapalette
 
-An Omarchy shell bar widget that turns theme switching into a colour decision.
+**Point it at your wallpaper collection and watch it dress your desktop.**
 
-The bar shows the active theme's palette as small circles. Hovering (or opening
-the popup) morphs them into a single continuous capsule; a theme switch
-crossfades the colours in place. The popup lists every installed theme as a card
-with its own palette circles **and the wallpaper that switching will actually
-apply** — picked by matching every wallpaper's palette against the theme palette
-in OKLab.
+Omapalette is an Omarchy bar widget that turns theme switching into a colour
+decision. It reads the palette of every wallpaper you own, and every theme card
+in its popup shows you the wallpaper that switching will actually apply — the
+one that already speaks that theme's colours. Click a colour instead of a theme
+and it generates a brand new theme out of it.
 
-![Palette popup over the Omarchy bar](docs/screenshot.png)
+In the bar it stays quiet: the active theme's palette as small circles that
+morph into one continuous capsule on hover, and crossfade in place when the
+theme changes.
 
-![Palette on the desktop](docs/screenshot-desktop.jpg)
+![Omapalette popup over the Omarchy bar](docs/screenshot.png)
+
+![Omapalette on the desktop](docs/screenshot-desktop.jpg)
 
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/janooh37-hue/omarchy-plugin-palette --enable
+omarchy plugin add https://github.com/janooh37-hue/omapalette --enable
 ```
 
-`--enable` adds `{ "id": "amh.palette" }` to the `right` section of the bar in
+`--enable` adds `{ "id": "omapalette" }` to the `right` section of the bar in
 `~/.config/omarchy/shell.json`. To place it yourself instead:
 
 ```bash
-omarchy plugin add https://github.com/janooh37-hue/omarchy-plugin-palette
-omarchy plugin enable amh.palette --section right
+omarchy plugin add https://github.com/janooh37-hue/omapalette
+omarchy plugin enable omapalette --section right
 ```
 
 The shell hot-reloads; the widget appears without a restart. Build the wallpaper
 palette index once (about 25s for ~1000 wallpapers, then cached):
 
 ```bash
-~/.config/omarchy/plugins/amh.palette/bin/palette index --rebuild
+~/.config/omarchy/plugins/omapalette/bin/omapalette index --rebuild
 ```
 
 ## Removal
 
 ```bash
-omarchy plugin remove amh.palette
-rm -rf ~/.cache/amh-palette
+omarchy plugin remove omapalette
+rm -rf ~/.cache/omapalette
 ```
 
 `omarchy plugin remove` deletes the plugin directory and drops the widget from
 `shell.json`. The second command clears the wallpaper palette cache. Themes and
 wallpapers the plugin applied stay as they are; the background symlinks it wrote
-live in `~/.config/omarchy/backgrounds/<theme>/palette-*` and can be deleted
-with `rm ~/.config/omarchy/backgrounds/*/palette-*`.
+live in `~/.config/omarchy/backgrounds/<theme>/omapalette-*` and can be deleted
+with `rm ~/.config/omarchy/backgrounds/*/omapalette-*`.
 
 ## Requirements
 
@@ -53,12 +56,12 @@ with `rm ~/.config/omarchy/backgrounds/*/palette-*`.
 |---|---|---|
 | Omarchy 4 (Quattro) shell | plugin host | ships with Omarchy |
 | `aether` | palette extraction and theme generation | Arch package `aether` (install it with your package manager) |
-| `python3` ≥ 3.11 | `bin/palette` engine (`tomllib`) | ships with Arch |
+| `python3` ≥ 3.11 | `bin/omapalette` engine (`tomllib`) | ships with Arch |
 
 The plugin never installs anything itself; install `aether` yourself before
 enabling the widget.
 
-Nothing is downloaded at runtime. `bin/palette` only reads theme `colors.toml`
+Nothing is downloaded at runtime. `bin/omapalette` only reads theme `colors.toml`
 files and your wallpapers, and shells out to `aether`, `omarchy-theme-set`,
 `omarchy-theme-bg-set` and `omarchy-theme-bg-current` with argument lists (no
 shell interpolation).
@@ -66,11 +69,11 @@ shell interpolation).
 ## Layout
 
 ```
-manifest.json      bar-widget plugin manifest (id: amh.palette)
+manifest.json      bar-widget plugin manifest (id: omapalette)
 Palette.qml        widget + popup (root type: qs.Ui.Panel)
 PaletteDots.qml    the morphing circle row
 PaletteData.js     colors.toml parsing + label helpers
-bin/palette        palette engine (index / map / match / apply)
+bin/omapalette     palette engine (index / map / match / apply)
 ```
 
 ## Interactions
@@ -98,15 +101,15 @@ Popup:
 | `r` | rebuild the wallpaper palette index |
 | esc | close |
 
-IPC (`omarchy-shell amh.palette <method> [arg]`):
+IPC (`omarchy-shell omapalette <method> [arg]`):
 `open`, `close`, `toggle`, `apply <theme>`, `wallpaper <best|next|prev|random>`,
 `generate <#hex>`, `reindex`, `morph`.
 
 ## How matching works
 
-`bin/palette` asks `aether --extract-palette --json` for each wallpaper in
-`~/Pictures/wallpapers/active_theme` (override with `AMH_PALETTE_WALLPAPERS`)
-and caches the 16-colour result in `~/.cache/amh-palette/index.json`, keyed by
+`bin/omapalette` asks `aether --extract-palette --json` for each wallpaper in
+`~/Pictures/wallpapers/active_theme` (override with `OMAPALETTE_WALLPAPERS`)
+and caches the 16-colour result in `~/.cache/omapalette/index.json`, keyed by
 mtime+size. Cold indexing of ~1000 wallpapers takes ~25s at 16 jobs; warm runs
 are ~0.1s.
 
@@ -123,7 +126,7 @@ A wallpaper's cost against a theme is computed in OKLab:
 - **mode penalty** — 0.35 when a dark theme meets a light wallpaper or vice
   versa.
 
-The per-theme top 12 is cached in `~/.cache/amh-palette/map.json` and
+The per-theme top 12 is cached in `~/.cache/omapalette/map.json` and
 invalidated by an index signature, so the popup can show previews instantly.
 
 ## Legibility rules
@@ -148,36 +151,36 @@ a photo — a light theme over a bright wallpaper used to render its label at
 
 ## What applying a theme does
 
-`palette apply <slug>`:
+`omapalette apply <slug>`:
 
 1. symlinks the top 12 matches into `~/.config/omarchy/backgrounds/<slug>/` as
-   `palette-NN.<ext>` (replacing the previous `palette-*` links), so omarchy's
+   `omapalette-NN.<ext>` (replacing the previous `omapalette-*` links), so omarchy's
    own `omarchy-theme-bg-next` and background switcher cycle inside the matched
    set;
 2. runs `omarchy-theme-set <slug>` with `OMARCHY_THEME_SKIP_BACKGROUND=1`, so
    the palette hot-swaps without omarchy choosing its own background;
 3. runs `omarchy-theme-bg-set <match>` for the crossfade.
 
-`palette from-color '#rrggbb'` instead finds the wallpaper that carries that
+`omapalette from-color '#rrggbb'` instead finds the wallpaper that carries that
 colour most convincingly and hands it to `aether --generate`, which builds and
 applies a fresh theme from it.
 
 Every one of these actions is user-initiated (click, key, or IPC call). The
 plugin writes nothing on load beyond its own cache under
-`~/.cache/amh-palette/`.
+`~/.cache/omapalette/`.
 
 ## CLI
 
 ```
-palette themes                  # installed themes + swatches (JSON)
-palette current                 # active theme + swatches (JSON)
-palette index [--rebuild]       # refresh the wallpaper palette cache
-palette map [--refresh]         # per-theme matched wallpapers (JSON)
-palette match --theme gruvbox -n 5
-palette match --color '#d3869b' -n 5
-palette apply gruvbox [--pick best|next|prev|random] [--keep-wallpaper]
-palette wallpaper [theme] [--pick next]
-palette from-color '#d3869b' [--light] [--mode <aether-extract-mode>]
+omapalette themes                  # installed themes + swatches (JSON)
+omapalette current                 # active theme + swatches (JSON)
+omapalette index [--rebuild]       # refresh the wallpaper palette cache
+omapalette map [--refresh]         # per-theme matched wallpapers (JSON)
+omapalette match --theme gruvbox -n 5
+omapalette match --color '#d3869b' -n 5
+omapalette apply gruvbox [--pick best|next|prev|random] [--keep-wallpaper]
+omapalette wallpaper [theme] [--pick next]
+omapalette from-color '#d3869b' [--light] [--mode <aether-extract-mode>]
 ```
 
 ## Settings
@@ -185,7 +188,7 @@ palette from-color '#d3869b' [--light] [--mode <aether-extract-mode>]
 Inline keys on the `shell.json` layout entry:
 
 ```json
-{ "id": "amh.palette", "dots": 6, "dotSize": 7, "columns": 3, "rows": 4, "autoIndex": true }
+{ "id": "omapalette", "dots": 6, "dotSize": 7, "columns": 3, "rows": 4, "autoIndex": true }
 ```
 
 `dots` swatch count (2-8) · `dotSize` circle diameter before text scaling ·

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Palette engine behind the amh.palette bar widget.
+"""Palette engine behind the omapalette bar widget.
 
 Indexes the wallpaper library with `aether --extract-palette --json`, then
 ranks wallpapers against an Omarchy theme palette (or a single colour) in
@@ -39,14 +39,14 @@ USER_THEMES = HOME / ".config/omarchy/themes"
 USER_BACKGROUNDS = HOME / ".config/omarchy/backgrounds"
 STATE = HOME / ".local/state/omarchy/current"
 WALLPAPER_DIR = Path(
-    os.environ.get("AMH_PALETTE_WALLPAPERS", HOME / "Pictures/wallpapers/active_theme")
+    os.environ.get("OMAPALETTE_WALLPAPERS", HOME / "Pictures/wallpapers/active_theme")
 ).expanduser()
-CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "amh-palette"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "omapalette"
 INDEX_FILE = CACHE_DIR / "index.json"
 MAP_FILE = CACHE_DIR / "map.json"
 PICKS_FILE = CACHE_DIR / "picks.json"
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
-LINK_PREFIX = "palette-"
+LINK_PREFIX = "omapalette-"
 DEFAULT_POOL = 12
 
 # aether returns an ANSI-shaped palette: 0 background, 7/15 foreground,
@@ -504,7 +504,7 @@ def emit(payload) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="palette", description=__doc__)
+    parser = argparse.ArgumentParser(prog="omapalette", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("themes", help="list themes with swatches (JSON)")
